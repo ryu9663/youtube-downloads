@@ -25,18 +25,58 @@
 ```
 [사용자] → [URL 입력] → [백엔드 검증]
     ↓
-[카운트 확인] → [yt-dlp 실행] → [파일 변환]
+[카운트 확인] → [yt-dlp 실행] → [Buffer 수집]
     ↓
-[임시 저장] → [다운로드 링크 생성] → [카운트 차감]
+[S3 직접 업로드] → [JWT 토큰 생성] → [링크 제공]
     ↓
-[결과 제공] ← [DB 업데이트] ← [성공 처리]
+[카운트 차감] ← [DB 업데이트] ← [다운로드 완료]
 ```
 
-### 2.3 기술 스택
+### 2.3 파일 전송 방식: 다운로드 링크
+
+**다운로드 링크 방식 선택 이유:**
+- **서버 부하 분산**: 파일 서빙을 별도로 처리
+- **재다운로드 지원**: 네트워크 중단시 재시도 가능
+- **확장성**: CDN 연동 및 글로벌 배포 용이
+- **사용자 편의성**: 다운로드 일시정지/재개 가능
+
+**기술적 구현:**
+```javascript
+// 1. yt-dlp 실행 및 데이터 수집
+const ytdlp = spawn('yt-dlp', [url, '-o', '-']);
+const chunks = [];
+ytdlp.stdout.on('data', chunk => chunks.push(chunk));
+
+// 2. Buffer 결합 후 S3 직접 업로드
+const finalBuffer = Buffer.concat(chunks);
+await s3Client.send(new PutObjectCommand({
+  Bucket: 'aneun-dongne',
+  Key: `youtube-download/${fileId}.${format}`,
+  Body: finalBuffer
+}));
+
+// 3. JWT 토큰으로 보안 링크 생성
+const token = jwt.sign({ s3Key, filename }, JWT_SECRET, { expiresIn: '10m' });
+res.json({ downloadUrl: `/api/file/${token}` });
+```
+
+**보안 고려사항:**
+- JWT 토큰 기반 일회용 링크
+- 링크 만료시간 설정 (10분)
+- 사용자별 다운로드 카운트 추적
+- 파일 자동 삭제 (24시간 후)
+
+**파일 생명주기 타임라인:**
+1. **파일 업로드**: 다운로드 요청 시 즉시 S3에 저장
+2. **JWT 만료**: 10분 후 - 다운로드 링크 접근 불가
+3. **파일 삭제**: 24시간 후 - S3에서 파일 완전 삭제
+
+### 2.4 기술 스택
 - **Frontend**: React + TypeScript + Vite
-- **Backend**: yt-dlp 연동 (Python/Node.js)
+- **Backend**: Node.js + Express + TypeScript + yt-dlp
 - **Database**: 사용자 세션 및 다운로드 카운트 관리
-- **Storage**: 임시 파일 저장소
+- **Storage**: AWS S3 (버킷: aneun-dongne, 폴더: youtube-download/)
+- **Authentication**: JWT 토큰 기반 보안 링크
 
 ## 3. 수익 모델
 
@@ -129,7 +169,8 @@
 ### 5.2 보안 요구사항
 - HTTPS 통신 필수
 - 사용자 IP 기반 남용 방지 (Rate Limiting)
-- 파일 안전한 임시 저장 및 자동 삭제
+- JWT 토큰 기반 보안 다운로드 링크
+- 파일 자동 삭제 및 링크 만료 관리
 - 개인정보 최소 수집 정책
 
 ### 5.3 확장성 고려사항
@@ -155,17 +196,21 @@
 
 ## 7. 개발 우선순위
 
-### 7.1 MVP (Phase 1)
-- [ ] 기본 YouTube URL 다운로드 기능
-- [ ] MP4 포맷 지원
+### 7.1 MVP (Phase 1) - ✅ 완료
+- [x] 기본 YouTube URL 다운로드 기능
+- [x] MP3 포맷 지원
+- [x] MP4 포맷 지원
+- [x] JWT 토큰 기반 보안 다운로드 링크
+- [x] S3 파일 저장 및 자동 삭제
 - [ ] 세션 기반 무료 다운로드 카운트 (5회)
 - [ ] 기본적인 UI/UX
 
 ### 7.2 Phase 2
-- [ ] MP3 포맷 지원 추가
+- [ ] 다운로드 카운트 시스템 구현
 - [ ] 결제 시스템 연동
 - [ ] 다운로드 진행 상태 표시
 - [ ] 에러 처리 및 사용자 알림
+- [ ] Rate Limiting 구현
 
 ### 7.3 Phase 3
 - [ ] 사용자 계정 시스템
@@ -198,7 +243,9 @@
 ### 9.1 기술적 리스크
 - **yt-dlp 의존성**: 백업 솔루션 및 버전 관리 전략 수립
 - **서버 부하**: 오토스케일링 및 로드밸런싱 구현
-- **저장소 용량**: 자동 파일 삭제 및 용량 모니터링
+- **AWS S3 비용**: 파일 저장 및 전송 비용 모니터링 필요
+- **메모리 사용량**: Buffer 수집 방식으로 인한 메모리 사용량 관리
+- **AWS SDK 스트림 제약**: flowing readable stream 해시 계산 이슈 대응
 
 ### 9.2 법적 리스크
 - **저작권 문제**: 명확한 이용약관 및 면책조항 설정
